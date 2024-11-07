@@ -11,7 +11,7 @@
  *                  trim - (optional) boolean to trim transparent space
  **/
 
-header( 'Content-Type: image/png' );
+header( 'Content-Type: image/webp' );
 
 $path = preg_replace( '/wp-content(?!.*wp-content).*/', '', __DIR__ );
 require_once $path . '/wp-load.php';
