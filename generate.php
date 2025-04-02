@@ -3,7 +3,7 @@
 /**
  * Description:     Create a single image, displayed in rows and colums,
  *                  from the featured images of a defined post type.
- * Version:         1.0
+ * Version:         1.1
  * Implementation:  <img src="http://example.com/generate.php?tax=TAXONOMY&term=TERM&trim=true" alt="Composite of Featured Images" />
  * Parameters:      type - (required) post type slug to be set in the configuration (not passed in the URL)
  *                  tax - (optional) taxonomy slug
@@ -11,8 +11,13 @@
  *                  trim - (optional) boolean to trim transparent space
  **/
 
-header( 'Content-Type: image/webp' );
+header( 'Cache-Control: max-age=86400, public' );
+header( 'Content-Type: image/png' );
 
+//error_reporting(E_ALL);
+//ini_set('display_errors', 1);
+
+// put this file in the same directory as wp-load.php or adjust accordingly
 $path = preg_replace( '/wp-content(?!.*wp-content).*/', '', __DIR__ );
 require_once $path . '/wp-load.php';
 
@@ -23,11 +28,17 @@ $config = array(
 	'columns'       => 7, // number of images per row
 	'padding'       => 10, // space between images
 	'max_images'    => 50, // keep this set to a reasonable number to prevent memory issues
-	'default_type'  => 'POST_TYPE', // type must always bet set
-	'default_tax'   => '', // optional
-	'default_term'  => '', // optional
+	'default_type'  => 'bios', // type must always bet set
+	'default_tax'   => 'position-type', // optional
+	'default_term'  => 'attorney', // optional
 	'aspect_ratio'  => array( 3, 4 ), // width, height
 );
+
+// Create cache directory if it doesn't exist
+$cache_dir = __DIR__ . '/cache';
+if ( ! file_exists( $cache_dir ) ) {
+	mkdir( $cache_dir, 0644, true );
+}
 
 // error handling
 function output_error_image( $message, $width = 400, $height = 100 ) {
@@ -39,11 +50,17 @@ function output_error_image( $message, $width = 400, $height = 100 ) {
 	imagestring( $img, 5, 10, 40, $message, $text_color );
 	imagepng( $img );
 	imagedestroy( $img );
+	error_log( "Error: $message" ); // Log the error
 	exit;
 }
 
 // helper function for fetching images via cURL
 function fetch_image_data( $url ) {
+	// Validate and sanitize the URL before using it
+	if ( ! filter_var( $url, FILTER_VALIDATE_URL ) || ! preg_match( '/^https?:\/\//', $url ) ) {
+		return false;
+	}
+
 	$ch = curl_init();
 	curl_setopt_array(
 		$ch,
@@ -57,7 +74,6 @@ function fetch_image_data( $url ) {
 			CURLOPT_CONNECTTIMEOUT => 5,
 		)
 	);
-
 	$data = curl_exec( $ch );
 
 	if ( curl_errno( $ch ) ) {
@@ -117,10 +133,22 @@ $params = array(
 	'trim' => isset( $_GET['trim'] ) ? filter_var( $_GET['trim'], FILTER_VALIDATE_BOOLEAN ) : false,
 );
 
+// Check cache
+$cache_key  = md5( $config['default_type'] . $params['tax'] . $params['term'] . ( $params['trim'] ? '1' : '0' ) );
+$cache_file = $cache_dir . '/' . $cache_key . '.png';
+
+
+// Serve from cache if available and less than 24 hours old
+if ( file_exists( $cache_file ) && ( filemtime( $cache_file ) > ( time() - 86400 ) ) ) {
+	readfile( $cache_file );
+	exit;
+}
+
 // build query arguments
 $args = array(
 	'post_type'      => $config['default_type'],
 	'posts_per_page' => $config['max_images'],
+	'fields'         => 'ids', // Only get post IDs for better performance
 );
 
 // add taxonomy query if parameters are set
@@ -138,7 +166,12 @@ if ( ! empty( $params['tax'] ) && ! empty( $params['term'] ) ) {
 }
 
 $query        = new WP_Query( $args );
-$total_images = $query->post_count;
+$post_ids     = $query->posts;
+$total_images = count( $post_ids );
+
+if ( $total_images === 0 ) {
+	output_error_image( 'No posts found' );
+}
 
 // calculate image dimensions based on number of columns set
 $image_width  = ( $config['canvas_width'] - ( ( $config['columns'] - 1 ) * $config['padding'] ) ) / $config['columns'];
@@ -153,47 +186,41 @@ imagesavealpha( $canvas, true );
 $transparent = imagecolorallocatealpha( $canvas, 0, 0, 0, 127 );
 imagefill( $canvas, 0, 0, $transparent );
 
-// process images
-if ( $query->have_posts() ) {
-	$row = 0;
-	$col = 0;
+// calculate vertical offset for centering
+$total_height = ( $image_height * $rows ) + ( $config['padding'] * ( $rows - 1 ) );
+$start_y      = ( $config['canvas_height'] - $total_height ) / 2;
 
-	// calculate vertical offset for centering
-	$total_height = ( $image_height * $rows ) + ( $config['padding'] * ( $rows - 1 ) );
-	$start_y      = ( $config['canvas_height'] - $total_height ) / 2;
+// Process images
+$row = 0;
+$col = 0;
 
-	while ( $query->have_posts() ) {
-		$query->the_post();
-		$image_url = get_the_post_thumbnail_url( get_the_ID(), 'full' );
+foreach ( $post_ids as $post_id ) {
+	$image_url = get_the_post_thumbnail_url( $post_id, 'full' );
 
-		if ( $image_url ) {
-			$image_data = fetch_image_data( $image_url );
+	if ( $image_url ) {
+		$image_data = fetch_image_data( $image_url );
 
-			if ( $image_data ) {
-				$image = imagecreatefromstring( $image_data );
+		if ( $image_data ) {
+			$image = @imagecreatefromstring( $image_data );
 
-				if ( $image ) {
-					$x = ( $config['padding'] * $col ) + ( $image_width * $col );
-					$y = $start_y + ( $image_height + $config['padding'] ) * $row;
+			if ( $image ) {
+				$x = ( $config['padding'] * $col ) + ( $image_width * $col );
+				$y = $start_y + ( $image_height + $config['padding'] ) * $row;
 
-					$processed_image = crop_and_resize( $image, $image_width, $image_height, $config['aspect_ratio'] );
-					imagecopy( $canvas, $processed_image, $x, $y, 0, 0, $image_width, $image_height );
+				$processed_image = crop_and_resize( $image, $image_width, $image_height, $config['aspect_ratio'] );
+				imagecopy( $canvas, $processed_image, $x, $y, 0, 0, $image_width, $image_height );
 
-					imagedestroy( $processed_image );
-					imagedestroy( $image );
+				imagedestroy( $processed_image );
+				imagedestroy( $image );
 
-					++$col;
-					if ( $col >= $config['columns'] ) {
-						$col = 0;
-						++$row;
-					}
+				++$col;
+				if ( $col >= $config['columns'] ) {
+					$col = 0;
+					++$row;
 				}
 			}
 		}
 	}
-	wp_reset_postdata();
-} else {
-	output_error_image( 'No posts found' );
 }
 
 // trim to the edges of the rows / columns if requested
@@ -257,6 +284,9 @@ if ( $params['trim'] ) {
 	imagedestroy( $canvas );
 	$canvas = $new_canvas;
 }
+
+// Save to cache file
+imagepng( $canvas, $cache_file, 9 );
 
 // output final image and destroy to free memory
 imagepng( $canvas, null, 9 );
